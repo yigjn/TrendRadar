@@ -56,6 +56,7 @@ def load_config():
         "REQUEST_INTERVAL": config_data["crawler"]["request_interval"],
         "REPORT_MODE": config_data["report"]["mode"],
         "RANK_THRESHOLD": config_data["report"]["rank_threshold"],
+        "PLATFORM_DISPLAY_COUNT": config_data["report"].get("platform_display_count", 20),
         "USE_PROXY": config_data["crawler"]["use_proxy"],
         "DEFAULT_PROXY": config_data["crawler"]["default_proxy"],
         "ENABLE_CRAWLER": config_data["crawler"]["enable_crawler"],
@@ -1370,6 +1371,93 @@ def prepare_report_data(
     }
 
 
+def prepare_platform_data(
+        stats: List[Dict],
+        id_to_name: Dict,
+        results: Dict,
+        title_info: Dict,
+        display_count: int = 20,
+        rank_threshold: int = 5,
+) -> Dict:
+    """准备按平台分组的数据"""
+    platform_data = {}
+    
+    platform_order = []
+    for platform_config in CONFIG.get("PLATFORMS", []):
+        platform_id = platform_config.get("id", "")
+        platform_name = platform_config.get("name", platform_id)
+        platform_order.append((platform_id, platform_name))
+    
+    for source_id, source_name in platform_order:
+        if source_id not in results:
+            continue
+            
+        titles_data = results.get(source_id, {})
+        if not titles_data:
+            continue
+        
+        platform_titles = []
+        for title, data in titles_data.items():
+            ranks = data.get("ranks", [])
+            url = data.get("url", "")
+            mobile_url = data.get("mobileUrl", "")
+            
+            first_time = ""
+            last_time = ""
+            count_info = 1
+            if title_info and source_id in title_info and title in title_info[source_id]:
+                info = title_info[source_id][title]
+                first_time = info.get("first_time", "")
+                last_time = info.get("last_time", "")
+                count_info = info.get("count", 1)
+            
+            time_display = format_time_display(first_time, last_time)
+            
+            platform_titles.append({
+                "title": title,
+                "source_name": source_name,
+                "first_time": first_time,
+                "last_time": last_time,
+                "time_display": time_display,
+                "count": count_info,
+                "ranks": ranks,
+                "rank_threshold": rank_threshold,
+                "url": url,
+                "mobile_url": mobile_url,
+                "is_new": False,
+            })
+        
+        sorted_titles = sorted(
+            platform_titles,
+            key=lambda x: (
+                min(x["ranks"]) if x["ranks"] else 999,
+                -x["count"],
+            ),
+        )
+        
+        display_titles = sorted_titles[:display_count]
+        
+        platform_data[source_name] = {
+            "source_id": source_id,
+            "titles": display_titles,
+            "total_count": len(titles_data),
+            "display_count": len(display_titles),
+        }
+    
+    sorted_platform_data = {}
+    priority_platforms = ["抖音", "微博", "百度热搜", "今日头条"]
+    
+    for platform in priority_platforms:
+        if platform in platform_data:
+            sorted_platform_data[platform] = platform_data[platform]
+    
+    for platform_name, data in platform_data.items():
+        if platform_name not in sorted_platform_data:
+            sorted_platform_data[platform_name] = data
+    
+    return sorted_platform_data
+
+
 def format_title_for_platform(
         platform: str, title_data: Dict, show_source: bool = True
 ) -> str:
@@ -1513,6 +1601,8 @@ def generate_html_report(
         id_to_name: Optional[Dict] = None,
         mode: str = "daily",
         is_daily_summary: bool = False,
+        results: Optional[Dict] = None,
+        title_info: Optional[Dict] = None,
 ) -> str:
     """生成HTML报告"""
     if is_daily_summary:
@@ -1528,9 +1618,20 @@ def generate_html_report(
     file_path = get_output_path("html", filename)
 
     report_data = prepare_report_data(stats, failed_ids, new_titles, id_to_name, mode)
+    
+    platform_data = None
+    if results and id_to_name and title_info:
+        platform_data = prepare_platform_data(
+            stats,
+            id_to_name,
+            results,
+            title_info,
+            display_count=CONFIG.get("PLATFORM_DISPLAY_COUNT", 20),
+            rank_threshold=CONFIG["RANK_THRESHOLD"],
+        )
 
     html_content = render_html_content(
-        report_data, total_titles, is_daily_summary, mode
+        report_data, total_titles, is_daily_summary, mode, platform_data
     )
 
     with open(file_path, "w", encoding="utf-8") as f:
@@ -1549,592 +1650,608 @@ def render_html_content(
         total_titles: int,
         is_daily_summary: bool = False,
         mode: str = "daily",
+        platform_data: Optional[Dict] = None,
 ) -> str:
-    """渲染HTML内容"""
+    """渲染HTML内容 - 高端横向滚动卡片布局"""
     html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>热点新闻分析</title>
-        <style>
-            * { box-sizing: border-box; }
-            body { 
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-                margin: 0; 
-                padding: 16px; 
-                background: #fafafa;
-                color: #333;
-                line-height: 1.5;
-            }
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrendRadar - 热点聚合</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        :root {
+            --bg-primary: #0f0f23;
+            --bg-secondary: #1a1a2e;
+            --bg-card: rgba(255, 255, 255, 0.03);
+            --bg-card-hover: rgba(255, 255, 255, 0.06);
+            --text-primary: #ffffff;
+            --text-secondary: rgba(255, 255, 255, 0.7);
+            --text-muted: rgba(255, 255, 255, 0.4);
+            --accent-blue: #6366f1;
+            --accent-purple: #8b5cf6;
+            --accent-pink: #ec4899;
+            --accent-orange: #f97316;
+            --accent-green: #10b981;
+            --border-color: rgba(255, 255, 255, 0.08);
+            --glass-bg: rgba(255, 255, 255, 0.05);
+            --shadow-lg: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+        
+        .bg-gradient {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: 
+                radial-gradient(ellipse 80% 50% at 20% -20%, rgba(99, 102, 241, 0.15), transparent),
+                radial-gradient(ellipse 60% 40% at 80% 100%, rgba(139, 92, 246, 0.1), transparent),
+                radial-gradient(ellipse 40% 30% at 50% 50%, rgba(236, 72, 153, 0.05), transparent);
+            pointer-events: none;
+            z-index: 0;
+        }
+        
+        .app {
+            position: relative;
+            z-index: 1;
+            min-height: 100vh;
+        }
+        
+        .header {
+            padding: 40px 32px 32px;
+            text-align: center;
+        }
+        
+        .logo {
+            display: inline-flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+        
+        .logo-icon {
+            width: 48px;
+            height: 48px;
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            box-shadow: 0 8px 32px rgba(99, 102, 241, 0.3);
+        }
+        
+        .logo-text {
+            font-size: 28px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #fff, rgba(255,255,255,0.8));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -0.5px;
+        }
+        
+        .stats-bar {
+            display: flex;
+            justify-content: center;
+            gap: 48px;
+            flex-wrap: wrap;
+        }
+        
+        .stat-item {
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 32px;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 4px;
+        }
+        
+        .stat-label {
+            font-size: 13px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .nav-container {
+            padding: 0 32px 24px;
+            position: relative;
+        }
+        
+        .nav-wrapper {
+            position: relative;
+        }
+        
+        .platform-nav {
+            display: flex;
+            gap: 8px;
+            overflow-x: auto;
+            padding: 4px;
+            scrollbar-width: none;
+            -ms-overflow-style: none;
+            scroll-behavior: smooth;
+        }
+        
+        .platform-nav::-webkit-scrollbar { display: none; }
+        
+        .nav-btn {
+            flex-shrink: 0;
+            padding: 10px 20px;
+            border-radius: 100px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            background: var(--glass-bg);
+            color: var(--text-secondary);
+            border: 1px solid var(--border-color);
+            white-space: nowrap;
+        }
+        
+        .nav-btn:hover {
+            background: var(--bg-card-hover);
+            color: var(--text-primary);
+            border-color: rgba(255, 255, 255, 0.15);
+        }
+        
+        .nav-btn.active {
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+            color: white;
+            border-color: transparent;
+            box-shadow: 0 4px 20px rgba(99, 102, 241, 0.4);
+        }
+        
+        .nav-btn .count {
+            margin-left: 6px;
+            opacity: 0.7;
+            font-size: 12px;
+        }
+        
+        .cards-container {
+            padding: 0 32px 40px;
+        }
+        
+        .cards-scroll {
+            display: flex;
+            gap: 24px;
+            overflow-x: auto;
+            padding: 8px 0 24px;
+            scroll-behavior: smooth;
+            scrollbar-width: thin;
+            scrollbar-color: var(--accent-blue) var(--bg-secondary);
+        }
+        
+        .cards-scroll::-webkit-scrollbar {
+            height: 6px;
+        }
+        
+        .cards-scroll::-webkit-scrollbar-track {
+            background: var(--bg-secondary);
+            border-radius: 3px;
+        }
+        
+        .cards-scroll::-webkit-scrollbar-thumb {
+            background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
+            border-radius: 3px;
+        }
+        
+        .platform-card {
+            flex: 0 0 340px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            overflow: hidden;
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        .platform-card:hover {
+            background: var(--bg-card-hover);
+            border-color: rgba(255, 255, 255, 0.12);
+            transform: translateY(-4px);
+            box-shadow: var(--shadow-lg);
+        }
+        
+        .card-header {
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        
+        .card-title-group {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        
+        .card-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+        }
+        
+        .card-icon.toutiao { background: linear-gradient(135deg, #ff6b6b, #ee5a5a); }
+        .card-icon.baidu { background: linear-gradient(135deg, #3b82f6, #2563eb); }
+        .card-icon.weibo { background: linear-gradient(135deg, #f97316, #ea580c); }
+        .card-icon.douyin { background: linear-gradient(135deg, #000, #333); }
+        .card-icon.zhihu { background: linear-gradient(135deg, #0ea5e9, #0284c7); }
+        .card-icon.bilibili { background: linear-gradient(135deg, #ec4899, #db2777); }
+        .card-icon.wallstreet { background: linear-gradient(135deg, #10b981, #059669); }
+        .card-icon.thepaper { background: linear-gradient(135deg, #ef4444, #dc2626); }
+        .card-icon.cls { background: linear-gradient(135deg, #f59e0b, #d97706); }
+        .card-icon.ifeng { background: linear-gradient(135deg, #8b5cf6, #7c3aed); }
+        .card-icon.tieba { background: linear-gradient(135deg, #06b6d4, #0891b2); }
+        .card-icon.default { background: linear-gradient(135deg, #6366f1, #8b5cf6); }
+        
+        .card-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        
+        .card-count {
+            font-size: 12px;
+            color: var(--text-muted);
+            background: rgba(255, 255, 255, 0.05);
+            padding: 4px 10px;
+            border-radius: 100px;
+        }
+        
+        .card-body {
+            max-height: 480px;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: var(--border-color) transparent;
+        }
+        
+        .card-body::-webkit-scrollbar {
+            width: 4px;
+        }
+        
+        .card-body::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        
+        .card-body::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 2px;
+        }
+        
+        .news-list {
+            list-style: none;
+        }
+        
+        .news-item {
+            padding: 14px 20px;
+            border-bottom: 1px solid var(--border-color);
+            transition: background 0.2s;
+            cursor: pointer;
+        }
+        
+        .news-item:last-child {
+            border-bottom: none;
+        }
+        
+        .news-item:hover {
+            background: rgba(255, 255, 255, 0.02);
+        }
+        
+        .news-top {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+        }
+        
+        .news-rank {
+            flex-shrink: 0;
+            width: 24px;
+            height: 24px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: 600;
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-muted);
+        }
+        
+        .news-rank.top-1 { background: linear-gradient(135deg, #fbbf24, #f59e0b); color: #000; }
+        .news-rank.top-2 { background: linear-gradient(135deg, #94a3b8, #64748b); color: #fff; }
+        .news-rank.top-3 { background: linear-gradient(135deg, #f97316, #ea580c); color: #fff; }
+        .news-rank.high { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
+        
+        .news-content {
+            flex: 1;
+            min-width: 0;
+        }
+        
+        .news-title {
+            font-size: 14px;
+            line-height: 1.5;
+            color: var(--text-primary);
+            margin-bottom: 6px;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+        
+        .news-link {
+            color: inherit;
+            text-decoration: none;
+            transition: color 0.2s;
+        }
+        
+        .news-link:hover {
+            color: var(--accent-blue);
+        }
+        
+        .news-meta {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+        
+        .news-time {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        
+        .news-count {
+            color: var(--accent-green);
+            font-weight: 500;
+        }
+        
+        .footer {
+            text-align: center;
+            padding: 24px;
+            color: var(--text-muted);
+            font-size: 12px;
+            border-top: 1px solid var(--border-color);
+        }
+        
+        .footer a {
+            color: var(--accent-blue);
+            text-decoration: none;
+        }
+        
+        @media (max-width: 768px) {
+            .header { padding: 24px 16px; }
+            .logo-text { font-size: 22px; }
+            .stats-bar { gap: 24px; }
+            .stat-value { font-size: 24px; }
+            .nav-container { padding: 0 16px 16px; }
+            .cards-container { padding: 0 16px 24px; }
+            .platform-card { flex: 0 0 300px; }
+            .card-body { max-height: 400px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="bg-gradient"></div>
+    <div class="app">
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">🔥</div>
+                <span class="logo-text">TrendRadar</span>
+            </div>
+            <div class="stats-bar">
+                <div class="stat-item">
+                    <div class="stat-value">"""
 
-            .container {
-                max-width: 600px;
-                margin: 0 auto;
-                background: white;
-                border-radius: 12px;
-                overflow: hidden;
-                box-shadow: 0 2px 16px rgba(0,0,0,0.06);
-            }
-
-            .header {
-                background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
-                color: white;
-                padding: 32px 24px;
-                text-align: center;
-            }
-
-            .header-title {
-                font-size: 22px;
-                font-weight: 700;
-                margin: 0 0 20px 0;
-            }
-
-            .header-info {
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 16px;
-                font-size: 14px;
-                opacity: 0.95;
-            }
-
-            .info-item {
-                text-align: center;
-            }
-
-            .info-label {
-                display: block;
-                font-size: 12px;
-                opacity: 0.8;
-                margin-bottom: 4px;
-            }
-
-            .info-value {
-                font-weight: 600;
-                font-size: 16px;
-            }
-
-            .content {
-                padding: 24px;
-            }
-
-            .word-group {
-                margin-bottom: 40px;
-            }
-
-            .word-group:first-child {
-                margin-top: 0;
-            }
-
-            .word-header {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                margin-bottom: 20px;
-                padding-bottom: 8px;
-                border-bottom: 1px solid #f0f0f0;
-            }
-
-            .word-info {
-                display: flex;
-                align-items: center;
-                gap: 12px;
-            }
-
-            .word-name {
-                font-size: 17px;
-                font-weight: 600;
-                color: #1a1a1a;
-            }
-
-            .word-count {
-                color: #666;
-                font-size: 13px;
-                font-weight: 500;
-            }
-
-            .word-count.hot { color: #dc2626; font-weight: 600; }
-            .word-count.warm { color: #ea580c; font-weight: 600; }
-
-            .word-index {
-                color: #999;
-                font-size: 12px;
-            }
-
-            .news-item {
-                margin-bottom: 20px;
-                padding: 16px 0;
-                border-bottom: 1px solid #f5f5f5;
-                position: relative;
-                display: flex;
-                gap: 12px;
-                align-items: center;
-            }
-
-            .news-item:last-child {
-                border-bottom: none;
-            }
-
-            .news-item.new::after {
-                content: "NEW";
-                position: absolute;
-                top: 12px;
-                right: 0;
-                background: #fbbf24;
-                color: #92400e;
-                font-size: 9px;
-                font-weight: 700;
-                padding: 3px 6px;
-                border-radius: 4px;
-                letter-spacing: 0.5px;
-            }
-
-            .news-number {
-                color: #999;
-                font-size: 13px;
-                font-weight: 600;
-                min-width: 20px;
-                text-align: center;
-                flex-shrink: 0;
-                background: #f8f9fa;
-                border-radius: 50%;
-                width: 24px;
-                height: 24px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                align-self: flex-start;
-                margin-top: 8px;
-            }
-
-            .news-content {
-                flex: 1;
-                min-width: 0;
-                padding-right: 40px;
-            }
-
-            .news-item.new .news-content {
-                padding-right: 50px;
-            }
-
-            .news-header {
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                margin-bottom: 8px;
-                flex-wrap: wrap;
-            }
-
-            .source-name {
-                color: #666;
-                font-size: 12px;
-                font-weight: 500;
-            }
-
-            .rank-num {
-                color: #fff;
-                background: #6b7280;
-                font-size: 10px;
-                font-weight: 700;
-                padding: 2px 6px;
-                border-radius: 10px;
-                min-width: 18px;
-                text-align: center;
-            }
-
-            .rank-num.top { background: #dc2626; }
-            .rank-num.high { background: #ea580c; }
-
-            .time-info {
-                color: #999;
-                font-size: 11px;
-            }
-
-            .count-info {
-                color: #059669;
-                font-size: 11px;
-                font-weight: 500;
-            }
-
-            .news-title {
-                font-size: 15px;
-                line-height: 1.4;
-                color: #1a1a1a;
-                margin: 0;
-            }
-
-            .news-link {
-                color: #2563eb;
-                text-decoration: none;
-            }
-
-            .news-link:hover {
-                text-decoration: underline;
-            }
-
-            .news-link:visited {
-                color: #7c3aed;
-            }
-
-            .new-section {
-                margin-top: 40px;
-                padding-top: 24px;
-                border-top: 2px solid #f0f0f0;
-            }
-
-            .new-section-title {
-                color: #1a1a1a;
-                font-size: 16px;
-                font-weight: 600;
-                margin: 0 0 20px 0;
-            }
-
-            .new-source-group {
-                margin-bottom: 24px;
-            }
-
-            .new-source-title {
-                color: #666;
-                font-size: 13px;
-                font-weight: 500;
-                margin: 0 0 12px 0;
-                padding-bottom: 6px;
-                border-bottom: 1px solid #f5f5f5;
-            }
-
-            .new-item {
-                display: flex;
-                align-items: center;
-                gap: 12px;
-                padding: 8px 0;
-                border-bottom: 1px solid #f9f9f9;
-            }
-
-            .new-item:last-child {
-                border-bottom: none;
-            }
-
-            .new-item-number {
-                color: #999;
-                font-size: 12px;
-                font-weight: 600;
-                min-width: 18px;
-                text-align: center;
-                flex-shrink: 0;
-                background: #f8f9fa;
-                border-radius: 50%;
-                width: 20px;
-                height: 20px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-            }
-
-            .new-item-rank {
-                color: #fff;
-                background: #6b7280;
-                font-size: 10px;
-                font-weight: 700;
-                padding: 3px 6px;
-                border-radius: 8px;
-                min-width: 20px;
-                text-align: center;
-                flex-shrink: 0;
-            }
-
-            .new-item-rank.top { background: #dc2626; }
-            .new-item-rank.high { background: #ea580c; }
-
-            .new-item-content {
-                flex: 1;
-                min-width: 0;
-            }
-
-            .new-item-title {
-                font-size: 14px;
-                line-height: 1.4;
-                color: #1a1a1a;
-                margin: 0;
-            }
-
-            .error-section {
-                background: #fef2f2;
-                border: 1px solid #fecaca;
-                border-radius: 8px;
-                padding: 16px;
-                margin-bottom: 24px;
-            }
-
-            .error-title {
-                color: #dc2626;
-                font-size: 14px;
-                font-weight: 600;
-                margin: 0 0 8px 0;
-            }
-
-            .error-list {
-                list-style: none;
-                padding: 0;
-                margin: 0;
-            }
-
-            .error-item {
-                color: #991b1b;
-                font-size: 13px;
-                padding: 2px 0;
-                font-family: 'SF Mono', Consolas, monospace;
-            }
-
-            @media (max-width: 480px) {
-                body { padding: 12px; }
-                .header { padding: 24px 20px; }
-                .content { padding: 20px; }
-                .header-info { grid-template-columns: 1fr; gap: 12px; }
-                .news-header { gap: 6px; }
-                .news-content { padding-right: 45px; }
-                .news-item { gap: 8px; }
-                .new-item { gap: 8px; }
-                .news-number { width: 20px; height: 20px; font-size: 12px; }
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <div class="header-title">热点新闻分析</div>
-                <div class="header-info">
-                    <div class="info-item">
-                        <span class="info-label">报告类型</span>
-                        <span class="info-value">"""
-
-    # 处理报告类型显示
-    if is_daily_summary:
-        if mode == "current":
-            html += "当前榜单"
-        elif mode == "incremental":
-            html += "增量模式"
-        else:
-            html += "当日汇总"
-    else:
-        html += "实时分析"
-
-    html += """</span>
-                    </div>
-                    <div class="info-item">
-                        <span class="info-label">新闻总数</span>
-                        <span class="info-value">"""
-
-    html += f"{total_titles} 条"
-
-    # 计算筛选后的热点新闻数量
-    hot_news_count = sum(len(stat["titles"]) for stat in report_data["stats"])
-
-    html += """</span>
-                    </div>
-                    <div class="info-item">
-                        <span class="info-label">热点新闻</span>
-                        <span class="info-value">"""
-
-    html += f"{hot_news_count} 条"
-
-    html += """</span>
-                    </div>
-                    <div class="info-item">
-                        <span class="info-label">生成时间</span>
-                        <span class="info-value">"""
+    platform_count = len(platform_data) if platform_data else 0
+    html += f"{platform_count}</div><div class='stat-label'>平台</div></div>"
+    html += f"<div class='stat-item'><div class='stat-value'>{total_titles}</div><div class='stat-label'>热点</div></div>"
 
     now = get_beijing_time()
-    html += now.strftime("%m-%d %H:%M")
+    html += f"<div class='stat-item'><div class='stat-value'>{now.strftime('%H:%M')}</div><div class='stat-label'>更新</div></div>"
 
-    html += """</span>
-                    </div>
+    html += """
+            </div>
+        </header>
+        
+        <nav class="nav-container">
+            <div class="nav-wrapper">
+                <div class="platform-nav" id="platformNav">
+                    <button class="nav-btn active" data-platform="all" onclick="scrollToPlatform('all')">全部</button>"""
+
+    if platform_data:
+        for platform_name, data in platform_data.items():
+            escaped_name = html_escape(platform_name)
+            html += f"""
+                    <button class="nav-btn" data-platform="{escaped_name}" onclick="scrollToPlatform('{escaped_name}')">{escaped_name}<span class="count">{data['display_count']}</span></button>"""
+
+    html += """
                 </div>
             </div>
+        </nav>
+        
+        <main class="cards-container">
+            <div class="cards-scroll" id="cardsScroll">"""
 
-            <div class="content">"""
-
-    # 处理失败ID错误信息
-    if report_data["failed_ids"]:
-        html += """
-                <div class="error-section">
-                    <div class="error-title">⚠️ 请求失败的平台</div>
-                    <ul class="error-list">"""
-        for id_value in report_data["failed_ids"]:
-            html += f'<li class="error-item">{html_escape(id_value)}</li>'
-        html += """
-                    </ul>
-                </div>"""
-
-    # 处理主要统计数据
-    if report_data["stats"]:
-        total_count = len(report_data["stats"])
-
-        for i, stat in enumerate(report_data["stats"], 1):
-            count = stat["count"]
-
-            # 确定热度等级
-            if count >= 10:
-                count_class = "hot"
-            elif count >= 5:
-                count_class = "warm"
-            else:
-                count_class = ""
-
-            escaped_word = html_escape(stat["word"])
-
+    if platform_data:
+        platform_icons = {
+            "今日头条": ("toutiao", "📰"),
+            "百度热搜": ("bilibili", "🔍"),
+            "华尔街见闻": ("wallstreet", "💰"),
+            "澎湃新闻": ("thepaper", "📋"),
+            "bilibili 热搜": ("bilibili", "📺"),
+            "财联社热门": ("cls", "📈"),
+            "凤凰网": ("ifeng", "🦅"),
+            "贴吧": ("tieba", "💬"),
+            "微博": ("weibo", "🐦"),
+            "抖音": ("douyin", "🎵"),
+            "知乎": ("zhihu", "❓"),
+        }
+        
+        for platform_name, data in platform_data.items():
+            icon_info = platform_icons.get(platform_name, ("default", "📱"))
+            icon_class, icon_emoji = icon_info
+            escaped_name = html_escape(platform_name)
+            
             html += f"""
-                <div class="word-group">
-                    <div class="word-header">
-                        <div class="word-info">
-                            <div class="word-name">{escaped_word}</div>
-                            <div class="word-count {count_class}">{count} 条</div>
+                <div class="platform-card" id="card-{escaped_name}">
+                    <div class="card-header">
+                        <div class="card-title-group">
+                            <div class="card-icon {icon_class}">{icon_emoji}</div>
+                            <h3 class="card-title">{escaped_name}</h3>
                         </div>
-                        <div class="word-index">{i}/{total_count}</div>
-                    </div>"""
-
-            # 处理每个词组下的新闻标题，给每条新闻标上序号
-            for j, title_data in enumerate(stat["titles"], 1):
-                is_new = title_data.get("is_new", False)
-                new_class = "new" if is_new else ""
-
-                html += f"""
-                    <div class="news-item {new_class}">
-                        <div class="news-number">{j}</div>
-                        <div class="news-content">
-                            <div class="news-header">
-                                <span class="source-name">{html_escape(title_data["source_name"])}</span>"""
-
-                # 处理排名显示
+                        <span class="card-count">{data['display_count']}/{data['total_count']}</span>
+                    </div>
+                    <div class="card-body">
+                        <ul class="news-list">"""
+            
+            for idx, title_data in enumerate(data["titles"], 1):
                 ranks = title_data.get("ranks", [])
-                if ranks:
-                    min_rank = min(ranks)
-                    max_rank = max(ranks)
-                    rank_threshold = title_data.get("rank_threshold", 10)
-
-                    # 确定排名等级
-                    if min_rank <= 3:
-                        rank_class = "top"
-                    elif min_rank <= rank_threshold:
-                        rank_class = "high"
-                    else:
-                        rank_class = ""
-
-                    if min_rank == max_rank:
-                        rank_text = str(min_rank)
-                    else:
-                        rank_text = f"{min_rank}-{max_rank}"
-
-                    html += f'<span class="rank-num {rank_class}">{rank_text}</span>'
-
-                # 处理时间显示
+                min_rank = min(ranks) if ranks else 999
+                rank_threshold = title_data.get("rank_threshold", 5)
+                
+                if min_rank == 1:
+                    rank_class = "top-1"
+                elif min_rank == 2:
+                    rank_class = "top-2"
+                elif min_rank == 3:
+                    rank_class = "top-3"
+                elif min_rank <= rank_threshold:
+                    rank_class = "high"
+                else:
+                    rank_class = ""
+                
+                rank_text = str(min_rank) if min_rank != 999 else "-"
+                
+                escaped_title = html_escape(title_data["title"])
+                link_url = title_data.get("mobile_url") or title_data.get("url", "")
+                
                 time_display = title_data.get("time_display", "")
                 if time_display:
-                    # 简化时间显示格式，将波浪线替换为~
-                    simplified_time = (
-                        time_display.replace(" ~ ", "~")
-                        .replace("[", "")
-                        .replace("]", "")
-                    )
-                    html += (
-                        f'<span class="time-info">{html_escape(simplified_time)}</span>'
-                    )
-
-                # 处理出现次数
+                    simplified_time = time_display.replace(" ~ ", "~").replace("[", "").replace("]", "")
+                else:
+                    simplified_time = ""
+                
                 count_info = title_data.get("count", 1)
-                if count_info > 1:
-                    html += f'<span class="count-info">{count_info}次</span>'
-
-                html += """
-                            </div>
-                            <div class="news-title">"""
-
-                # 处理标题和链接
-                escaped_title = html_escape(title_data["title"])
-                link_url = title_data.get("mobile_url") or title_data.get("url", "")
-
-                if link_url:
-                    escaped_url = html_escape(link_url)
-                    html += f'<a href="{escaped_url}" target="_blank" class="news-link">{escaped_title}</a>'
-                else:
-                    html += escaped_title
-
-                html += """
-                            </div>
-                        </div>
-                    </div>"""
-
-            html += """
-                </div>"""
-
-    # 处理新增新闻区域
-    if report_data["new_titles"]:
-        html += f"""
-                <div class="new-section">
-                    <div class="new-section-title">本次新增热点 (共 {report_data['total_new_count']} 条)</div>"""
-
-        for source_data in report_data["new_titles"]:
-            escaped_source = html_escape(source_data["source_name"])
-            titles_count = len(source_data["titles"])
-
-            html += f"""
-                    <div class="new-source-group">
-                        <div class="new-source-title">{escaped_source} · {titles_count}条</div>"""
-
-            # 为新增新闻也添加序号
-            for idx, title_data in enumerate(source_data["titles"], 1):
-                ranks = title_data.get("ranks", [])
-
-                # 处理新增新闻的排名显示
-                rank_class = ""
-                if ranks:
-                    min_rank = min(ranks)
-                    if min_rank <= 3:
-                        rank_class = "top"
-                    elif min_rank <= title_data.get("rank_threshold", 10):
-                        rank_class = "high"
-
-                    if len(ranks) == 1:
-                        rank_text = str(ranks[0])
-                    else:
-                        rank_text = f"{min(ranks)}-{max(ranks)}"
-                else:
-                    rank_text = "?"
-
+                
                 html += f"""
-                        <div class="new-item">
-                            <div class="new-item-number">{idx}</div>
-                            <div class="new-item-rank {rank_class}">{rank_text}</div>
-                            <div class="new-item-content">
-                                <div class="new-item-title">"""
-
-                # 处理新增新闻的链接
-                escaped_title = html_escape(title_data["title"])
-                link_url = title_data.get("mobile_url") or title_data.get("url", "")
-
+                            <li class="news-item">
+                                <div class="news-top">
+                                    <span class="news-rank {rank_class}">{rank_text}</span>
+                                    <div class="news-content">
+                                        <div class="news-title">"""
+                
                 if link_url:
                     escaped_url = html_escape(link_url)
                     html += f'<a href="{escaped_url}" target="_blank" class="news-link">{escaped_title}</a>'
                 else:
                     html += escaped_title
-
+                
+                html += """</div>
+                                        <div class="news-meta">"""
+                
+                if simplified_time:
+                    html += f'<span class="news-time">🕐 {html_escape(simplified_time)}</span>'
+                
+                if count_info > 1:
+                    html += f'<span class="news-count">🔥 {count_info}次</span>'
+                
                 html += """
+                                        </div>
+                                    </div>
                                 </div>
-                            </div>
-                        </div>"""
-
+                            </li>"""
+            
             html += """
-                    </div>"""
-
-        html += """
+                        </ul>
+                    </div>
                 </div>"""
 
     html += """
             </div>
-        </div>
-    </body>
-    </html>
-    """
+        </main>
+        
+        <footer class="footer">
+            Powered by <a href="https://github.com/yigjn/TrendRadar" target="_blank">TrendRadar</a>
+        </footer>
+    </div>
+    
+    <script>
+        function scrollToPlatform(platform) {
+            const nav = document.getElementById('platformNav');
+            const buttons = nav.querySelectorAll('.nav-btn');
+            buttons.forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+            
+            if (platform === 'all') {
+                document.getElementById('cardsScroll').scrollTo({ left: 0, behavior: 'smooth' });
+            } else {
+                const card = document.getElementById('card-' + platform);
+                if (card) {
+                    card.scrollIntoView({ behavior: 'smooth', inline: 'start', block: 'nearest' });
+                }
+            }
+        }
+        
+        const cardsScroll = document.getElementById('cardsScroll');
+        let isDown = false;
+        let startX;
+        let scrollLeft;
+        
+        cardsScroll.addEventListener('mousedown', (e) => {
+            isDown = true;
+            cardsScroll.style.cursor = 'grabbing';
+            startX = e.pageX - cardsScroll.offsetLeft;
+            scrollLeft = cardsScroll.scrollLeft;
+        });
+        
+        cardsScroll.addEventListener('mouseleave', () => {
+            isDown = false;
+            cardsScroll.style.cursor = 'grab';
+        });
+        
+        cardsScroll.addEventListener('mouseup', () => {
+            isDown = false;
+            cardsScroll.style.cursor = 'grab';
+        });
+        
+        cardsScroll.addEventListener('mousemove', (e) => {
+            if (!isDown) return;
+            e.preventDefault();
+            const x = e.pageX - cardsScroll.offsetLeft;
+            const walk = (x - startX) * 2;
+            cardsScroll.scrollLeft = scrollLeft - walk;
+        });
+        
+        cardsScroll.style.cursor = 'grab';
+    </script>
+</body>
+</html>
+"""
 
     return html
 
@@ -3174,6 +3291,8 @@ class NewsAnalyzer:
             id_to_name=id_to_name,
             mode=mode,
             is_daily_summary=is_daily_summary,
+            results=data_source,
+            title_info=title_info,
         )
 
         return stats, html_file
@@ -3490,7 +3609,7 @@ API_IDS = [
 
 def generate_api_data(
     analyzer: "NewsAnalyzer",
-) -> Tuple[Dict, List, int, List, Dict]:
+) -> Tuple[Dict, List, int, List, Dict, Dict, Dict]:
     """
     获取并分析来自固定源的趋势数据，返回API所需的所有数据。
     """
@@ -3517,7 +3636,7 @@ def generate_api_data(
             "failed_sources": failed_ids,
             "trends": [],
         }
-        return empty_response, [], 0, failed_ids, {}
+        return empty_response, [], 0, failed_ids, {}, {}, {}
 
     new_titles = detect_latest_new_titles(api_id_list)
     word_groups, filter_words = load_frequency_words()
@@ -3562,7 +3681,7 @@ def generate_api_data(
                 )
             api_response["trends"].append(trend_item)
 
-    return api_response, stats, total_titles, failed_ids, final_id_to_name
+    return api_response, stats, total_titles, failed_ids, final_id_to_name, all_results, title_info
 
 
 def generate_static_api_files(analyzer: "NewsAnalyzer"):
@@ -3575,6 +3694,8 @@ def generate_static_api_files(analyzer: "NewsAnalyzer"):
         total_titles,
         failed_ids,
         id_to_name,
+        all_results,
+        title_info,
     ) = generate_api_data(analyzer)
 
     # 生成与API数据关联的HTML报告
@@ -3585,6 +3706,8 @@ def generate_static_api_files(analyzer: "NewsAnalyzer"):
         id_to_name=id_to_name,
         mode="daily",
         is_daily_summary=True,
+        results=all_results,
+        title_info=title_info,
     )
     print(f"为API数据生成了HTML报告: {api_html_report_path}")
 

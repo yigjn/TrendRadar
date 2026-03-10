@@ -28,6 +28,7 @@ crawler:
 report:
   mode: "daily" # 可选: "daily"|"incremental"|"current"
   rank_threshold: 5 # 排名高亮阈值
+  platform_display_count: 20 # 每个平台显示的热点条数
 
 notification:
   enable_notification: true # 是否启用通知功能，false 时不发送手机通知
